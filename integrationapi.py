@@ -1357,7 +1357,7 @@ def _calculate_p85(simulated_values):
         float: The 85th percentile value. Returns 0.0 if the input list is empty.
     """
     if len(simulated_values) == 0: return 0.0
-    return float(np.percentile(simulated_values, 90)) # Explicitly convert to float.
+    return float(np.percentile(simulated_values, 85)) # Explicitly convert to float.
 
 def _plot_to_base64(fig):
     """
@@ -4169,4 +4169,5 @@ def _save_procurement_schedule_log(log_entry):
             f.write(json.dumps(log_entry) + '\n')
     except Exception as e:
         print(f"Warning: Could not save procurement schedule log: {e}")
+
 
