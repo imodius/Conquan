@@ -612,8 +612,8 @@ if st.session_state.analysis_results:
 
             if all(val is not None for val in [adjusted_cost, contingency_reserve, management_reserve, baseline_most_likely_cad, total_project_cost_cad_from_backend]):
                 st.write(f"**Baseline Most Likely Cost:** ${baseline_most_likely_cad:,.2f} CAD")
-                st.write(f"**Contingency Reserve (P90 Contractor - ML Baseline):** ${contingency_reserve:,.2f} CAD")
-                st.write(f"**Management Reserve (P90 Owner/Engineer):** ${management_reserve:,.2f} CAD")
+                st.write(f"**Contingency Reserve (P85 Contractor - ML Baseline):** ${contingency_reserve:,.2f} CAD")
+                st.write(f"**Management Reserve (P85 Owner/Engineer):** ${management_reserve:,.2f} CAD")
                 st.write(f"**Total Project Budget:** ${total_project_cost_cad_from_backend:,.2f} CAD")
                 
                 # Display the bar graph
@@ -803,7 +803,7 @@ if st.session_state.analysis_results:
                 safety_total_project_cost_cad = safety_results.get('total_project_cost_after_safety_cad') # Corrected: Use actual total cost from backend
                 
                 # Use initial baseline from original analysis_results for comparison in budget breakdown
-                safety_baseline_most_likely_cad = st.session_state.analysis_results.get('baseline_estimates', {}).get('cost_most_likely_cad', 0.0)
+                safety_baseline_most_likely_cad = st.session_state.analysis_results.get('total_project_cost_cad', 0.0)
 
                 if all(val is not None for val in [total_before_procurement_cad, safety_contingency_reserve_cad, safety_management_reserve_cad, safety_baseline_most_likely_cad, safety_total_project_cost_cad]):
                     st.write(f"**Contingency Reserve (Combined Contractor):** ${safety_contingency_reserve_cad:,.2f} CAD")
