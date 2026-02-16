@@ -2122,21 +2122,18 @@ def _calculate_critical_path(tasks, simulated_durations, simulation_index):
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def run_analysis_pipeline_for_api(project_description):
-    """
-    Final Fixed Pipeline.
-    - Resolves NameError by ensuring 'adjusted_most_likely_time' is defined.
-    - Aggregates costs using File 1 logic.
-    - Generates all plots and data keys required by frontend.
-    """
+   
+    risk = {} 
+   
     results = {"error": None, "plots_base64": {}}
-    _update_internal_status("Starting integrated Cost Impact & Quantum analysis...", 5)
+    _update_internal_status("Starting initial analysis pipeline...", 5)
 
     try:
         # 1. Safety Screening
-        _update_internal_status("Performing safety screening...", 5)
+        _update_internal_status("Performing safety screening of project description...", 5)
         safety_check_result = _screen_description_for_safety(project_description)
-        if not safety_check_result.get('is_safe', False):
-            results['error'] = f"Safety Block: {safety_check_result.get('reason', 'Unknown safety violation')}"
+        if not safety_check_result['is_safe']:
+            results['error'] = f"Project description failed safety screening: {safety_check_result['reason']}"
             _update_internal_status(results['error'], 0, error=results['error'])
             return results
 
@@ -2144,213 +2141,336 @@ def run_analysis_pipeline_for_api(project_description):
         _update_internal_status("Generating baseline estimates...", 10)
         baseline_estimates = _generate_baseline_estimates_llm(project_description)
         if baseline_estimates.get('error'):
-            raise ValueError(f"Baseline Failure: {baseline_estimates['error']}")
-        
-        results['baseline_estimates'] = {k: float(v) for k, v in baseline_estimates.items() if not k == 'error'}
-        initial_most_likely_cost = float(baseline_estimates.get('cost_most_likely_cad', 0.0))
-        initial_most_likely_time = float(baseline_estimates.get('time_most_likely_weeks', 0.0))
+            raise ValueError(f"Failed to generate baseline estimates: {baseline_estimates['error']}")
+        results['baseline_estimates'] = {k: float(v) for k,v in baseline_estimates.items()}
+
+        initial_most_likely_cost = baseline_estimates['cost_most_likely_cad']
+        initial_most_likely_time = baseline_estimates['time_most_likely_weeks']
 
         # 3. Identify Risks and Opportunities
-        _update_internal_status("Identifying risks and opportunities...", 20)
+        _update_internal_status("Identifying risks and opportunities with LLM...", 20)
         risks_opportunities_raw = _identify_risks_and_opportunities_llm(project_description)
-        
-        opportunities = [r for r in risks_opportunities_raw if r.get('is_opportunity', False)]
-        risks = [r for r in risks_opportunities_raw if not r.get('is_opportunity', True)]
-        
+        risks_with_qualquan_data = []
+        opportunities_with_qualquan_data = []
+        opportunities = [r for r in risks_opportunities_raw if r['is_opportunity']]
+        risks = [r for r in risks_opportunities_raw if not r['is_opportunity']]
         results['identified_opportunities'] = opportunities
         results['identified_risks'] = risks
 
-        # --- Aggregation Variables ---
-        total_contractor_cost_impact = 0.0
-        total_oe_cost_impact = 0.0
-        total_opportunity_cost_reduction = 0.0
-        total_opportunity_time_reduction = 0.0
-        total_contractor_time_impact = 0.0
-        total_oe_time_impact = 0.0
+        total_contractor_cost_impact, total_contractor_time_impact = 0.0, 0.0
+        total_oe_cost_impact, total_oe_time_impact = 0.0, 0.0
+        total_shared_cost_impact, total_shared_time_impact = 0.0, 0.0
+        total_opportunity_cost_reduction, total_opportunity_time_reduction = 0.0, 0.0
 
-        # 4. Perform QualQuan Assessment for Risks
-        _update_internal_status("Performing QualQuan assessment for risks...", 30)
-        risks_with_qualquan_data = []
+        # 4. Perform QualQuan Assessment for risks
+        _update_internal_status("Performing QualQuan assessment for identified risks...", 30)
         for risk_item in tqdm(risks, desc="QualQuan Assessment (Risks)"):
-            desc = risk_item.get('risk_description', 'Unnamed Risk')
-            r_cat = risk_item.get('risk_category', 'Contractor-borne')
-            
-            qualquan_data = _qualquan_risk_assessment(project_description, desc, risk_category=r_cat)
-            
-            prob = float(qualquan_data.get('probability', 0.0))
-            impact = float(qualquan_data.get('impact', 0.0))
-            red_prob = float(qualquan_data.get('risk_reduction_probability', 0.0))
-            red_impact = float(qualquan_data.get('risk_reduction_impact', 0.0))
-            
-            effective_probability = prob * (1 - red_prob)
-            effective_impact = impact * (1 - red_impact)
-            
-            # File 1 Weighting Logic
-            weight = (effective_probability / 5.0) * (effective_impact / 5.0)
-
-            c_impact = float(qualquan_data.get('cost_most_likely_usd', 0.0)) * weight * USD_TO_CAD_EXCHANGE_RATE
-            t_impact = float(qualquan_data.get('time_most_likely_weeks', 0.0)) * weight
-
-            risk_item.update(qualquan_data)
+            qualquan_data = _qualquan_risk_assessment(project_description, risk_item['risk_description'])
+            effective_probability = qualquan_data['probability'] * (1 - qualquan_data['risk_reduction_probability'])
+            effective_impact = qualquan_data['impact'] * (1 - qualquan_data['risk_reduction_impact'])
             risk_item.update({
-                "effective_probability": effective_probability, 
-                "effective_impact": effective_impact, 
-                "cost_impact_cad": c_impact, 
-                "time_impact_weeks": t_impact,
-                "risk_category": r_cat
+                "qualitative_decision": qualquan_data['qualitative_decision'], "probability": qualquan_data['probability'],
+                "impact": qualquan_data['impact'], "effective_probability": effective_probability, "effective_impact": effective_impact,
+                "mitigation_strategy": qualquan_data['mitigation_strategy'], "risk_reduction_probability": qualquan_data['risk_reduction_probability'],
+                "risk_reduction_impact": qualquan_data['risk_reduction_impact'], "cost_optimistic_usd": qualquan_data['cost_optimistic_usd'],
+                "cost_most_likely_usd": qualquan_data['cost_most_likely_usd'], "cost_pessimistic_usd": qualquan_data['cost_pessimistic_usd'],
+                "time_optimistic_weeks": qualquan_data['time_optimistic_weeks'], "time_most_likely_weeks": qualquan_data['time_most_likely_weeks'],
+                "time_pessimistic_weeks": qualquan_data['time_pessimistic_weeks']
             })
-
-            if r_cat == 'Contractor-borne':
-                total_contractor_cost_impact += c_impact
-                total_contractor_time_impact += t_impact
-            elif r_cat in ['Owner-borne', 'Engineer-borne']:
-                total_oe_cost_impact += c_impact
-                total_oe_time_impact += t_impact
-            elif r_cat == 'Shared':
-                total_contractor_cost_impact += c_impact * 0.5
-                total_oe_cost_impact += c_impact * 0.5
-                total_contractor_time_impact += t_impact * 0.5
-                total_oe_time_impact += t_impact * 0.5
-
+            risk_item['cost_impact_cad'] = (qualquan_data['cost_most_likely_usd'] * (effective_probability / 5.0) * (effective_impact / 5.0)) * USD_TO_CAD_EXCHANGE_RATE
+            risk_item['time_impact_weeks'] = (qualquan_data['time_most_likely_weeks'] * (effective_probability / 5.0) * (effective_impact / 5.0))
             risks_with_qualquan_data.append(risk_item)
-        
-        # 5. Perform QualQuan Assessment for Opportunities
-        _update_internal_status("Performing QualQuan assessment for opportunities...", 35)
-        opportunities_with_qualquan_data = []
+            
+            risk_category = risk_item.get('risk_category', 'Contractor-borne')
+            if risk_category == 'Contractor-borne':
+                total_contractor_cost_impact += risk_item['cost_impact_cad']
+                total_contractor_time_impact += risk_item['time_impact_weeks']
+            elif risk_category in ['Owner-borne', 'Engineer-borne']:
+                total_oe_cost_impact += risk_item['cost_impact_cad']
+                total_oe_time_impact += risk_item['time_impact_weeks']
+            elif risk_category == 'Shared':
+                total_contractor_cost_impact += risk_item['cost_impact_cad'] * 0.5
+                total_contractor_time_impact += risk_item['time_impact_weeks'] * 0.5
+                total_oe_cost_impact += risk_item['cost_impact_cad'] * 0.5
+                total_oe_time_impact += risk_item['time_impact_weeks'] * 0.5
+        results['identified_risks_with_qualquan_data'] = risks_with_qualquan_data
+
+        # 5. Perform QualQuan Assessment for opportunities
+        _update_internal_status("Performing QualQuan assessment for identified opportunities...", 35)
         for opportunity_item in tqdm(opportunities, desc="QualQuan Assessment (Opportunities)"):
-            desc = opportunity_item.get('risk_description', 'Unnamed Opportunity')
-            r_cat = opportunity_item.get('risk_category', 'Shared')
-            qualquan_data = _qualquan_risk_assessment(project_description, desc, risk_category=r_cat)
-            
-            prob = float(qualquan_data.get('probability', 0.0))
-            impact = float(qualquan_data.get('impact', 0.0))
-            red_prob = float(qualquan_data.get('risk_reduction_probability', 0.0))
-            red_impact = float(qualquan_data.get('risk_reduction_impact', 0.0))
-
-            effective_probability = np.clip(prob * (1 + red_prob), 0.0, 5.0)
-            effective_impact = np.clip(impact * (1 + red_impact), 0.0, 5.0)
-            weight = (effective_probability / 5.0) * (effective_impact / 5.0)
-
-            c_ml = float(qualquan_data.get('cost_most_likely_usd', 0.0))
-            t_ml = float(qualquan_data.get('time_most_likely_weeks', 0.0))
-            
-            c_red = (abs(c_ml) * weight) * USD_TO_CAD_EXCHANGE_RATE
-            t_red = (abs(t_ml) * weight)
-            
-            total_opportunity_cost_reduction += c_red
-            total_opportunity_time_reduction += t_red
-            
-            opportunity_item.update(qualquan_data)
+            qualquan_data = _qualquan_risk_assessment(project_description, opportunity_item['risk_description'])
+            effective_probability = np.clip(qualquan_data['probability'] * (1 + qualquan_data['risk_reduction_probability']), 0.0, 5.0)
+            effective_impact = np.clip(qualquan_data['impact'] * (1 + qualquan_data['risk_reduction_impact']), 0.0, 5.0)
             opportunity_item.update({
-                "effective_probability": effective_probability,
-                "effective_impact": effective_impact,
-                "cost_reduction_cad": c_red, 
-                "time_reduction_weeks": t_red,
-                "risk_category": r_cat
+                "qualitative_decision": qualquan_data['qualitative_decision'], "probability": qualquan_data['probability'], "impact": qualquan_data['impact'],
+                "effective_probability": effective_probability, "effective_impact": effective_impact, "mitigation_strategy": qualquan_data['mitigation_strategy'],
+                "risk_reduction_probability": qualquan_data['risk_reduction_probability'], "risk_reduction_impact": qualquan_data['risk_reduction_impact'],
+                "cost_optimistic_usd": qualquan_data['cost_optimistic_usd'], "cost_most_likely_usd": qualquan_data['cost_most_likely_usd'], "cost_pessimistic_usd": qualquan_data['cost_pessimistic_usd'],
+                "time_optimistic_weeks": qualquan_data['time_optimistic_weeks'], "time_most_likely_weeks": qualquan_data['time_most_likely_weeks'], "time_pessimistic_weeks": qualquan_data['time_pessimistic_weeks']
             })
+            opportunity_item['cost_reduction_cad'] = (qualquan_data['cost_most_likely_usd'] * (effective_probability / 5.0) * (effective_impact / 5.0)) * USD_TO_CAD_EXCHANGE_RATE
+            opportunity_item['time_reduction_weeks'] = (qualquan_data['time_most_likely_weeks'] * (effective_probability / 5.0) * (effective_impact / 5.0))
+            total_opportunity_cost_reduction += opportunity_item['cost_reduction_cad']
+            total_opportunity_time_reduction += opportunity_item['time_reduction_weeks']
             opportunities_with_qualquan_data.append(opportunity_item)
+        results['identified_opportunities_with_qualquan_data'] = opportunities_with_qualquan_data
 
-        # 6. Calculate Quantum Influence and Adjust Baseline
+        # 6. Calculate Quantum Influence and Adjust Baseline Estimates
         _update_internal_status("Calculating quantum influence...", 50)
-        avg_effective_prob = float(np.mean([r['effective_probability'] for r in risks_with_qualquan_data])) if risks_with_qualquan_data else 0.0
-        avg_effective_impact = float(np.mean([r['effective_impact'] for r in risks_with_qualquan_data])) if risks_with_qualquan_data else 0.0
-        
+        avg_effective_prob = float(np.mean([r['effective_probability'] for r in risks_with_qualquan_data if not r.get('is_opportunity', False)])) if any(not r.get('is_opportunity', False) for r in risks_with_qualquan_data) else 0.0
+        avg_effective_impact = float(np.mean([r['effective_impact'] for r in risks_with_qualquan_data if not r.get('is_opportunity', False)])) if any(not r.get('is_opportunity', False) for r in risks_with_qualquan_data) else 0.0
         quantum_cost_influence, quantum_time_influence = _calculate_quantum_influence(avg_effective_prob, avg_effective_impact, initial_most_likely_cost, initial_most_likely_time)
         
-        # --- FIXED: Explicitly define adjusted_most_likely_time ---
         adjusted_most_likely_cost = max(0.0, initial_most_likely_cost + total_contractor_cost_impact + total_oe_cost_impact + quantum_cost_influence - total_opportunity_cost_reduction)
         adjusted_most_likely_time = max(0.0, initial_most_likely_time + total_contractor_time_impact + total_oe_time_impact + quantum_time_influence - total_opportunity_time_reduction)
 
-        # 7. PERT Monte Carlo Simulations
-        _update_internal_status("Running project-wide PERT simulation...", 60)
-        
-        c_opt = adjusted_most_likely_cost - (initial_most_likely_cost - float(baseline_estimates.get('cost_optimistic_cad', 0)))
-        c_pess = adjusted_most_likely_cost + (float(baseline_estimates.get('cost_pessimistic_cad', 0)) - initial_most_likely_cost)
-        sim_costs = _pert_monte_carlo_simulation(max(0, c_opt), adjusted_most_likely_cost, c_pess, num_simulations=NUM_SIMULATIONS)
-
-        # 8. Calculate Reserves
-        p85_cost = _calculate_p85(sim_costs)
-        total_contingency_needed = max(0, p85_cost - adjusted_most_likely_cost)
-        
-        impact_sum = (total_contractor_cost_impact + total_oe_cost_impact)
-        if impact_sum > 0:
-            cont_reserve = total_contingency_needed * (total_contractor_cost_impact / impact_sum)
-            mgmt_reserve = total_contingency_needed * (total_oe_cost_impact / impact_sum)
-        else:
-            cont_reserve = total_contingency_needed * 0.5
-            mgmt_reserve = total_contingency_needed * 0.5
-
-        total_project_cost_cad = p85_cost
-
-        # 9. Generate Graphs
-        _update_internal_status("Generating distribution plots...", 90)
-        results['plots_base64'] = {}
-
-        # Cost Plot
-        if len(sim_costs) > 0:
-            fig1, ax1 = plt.subplots(figsize=(10, 6))
-            ax1.hist(sim_costs, bins=50, density=True, alpha=0.7, color='skyblue', edgecolor='black', label='Cost Distribution')
-            ax1.set_title('Simulated Total Project Cost Distribution (PERT Analysis)')
-            ax1.set_xlabel('Cost (CAD)')
-            ax1.set_ylabel('Density')
-            ax1b = ax1.twinx()
-            sorted_costs = np.sort(sim_costs)
-            cdf = np.arange(1, len(sorted_costs) + 1) / len(sorted_costs)
-            ax1b.plot(sorted_costs, cdf * 100, color='blue', label='Cumulative Frequency (%)')
-            ax1.axvline(adjusted_most_likely_cost, color='red', linestyle='dotted', label=f'Adj. ML: ${adjusted_most_likely_cost:,.0f}')
-            ax1.axvline(p85_cost, color='green', linestyle='dotted', label=f'P85: ${p85_cost:,.0f}')
-            ax1.axvline(total_project_cost_cad, color='purple', linestyle='dashed', label=f'Total Project Cost: ${total_project_cost_cad:,.0f}')
-            lines, labels = ax1.get_legend_handles_labels()
-            lines2, labels2 = ax1b.get_legend_handles_labels()
-            ax1.legend(lines + lines2, labels + labels2, loc='upper left', bbox_to_anchor=(1.05, 1))
-            plt.tight_layout()
-            results['plots_base64']['cost_distribution_plot_base64'] = _plot_to_base64(fig1)
-
-        # Time Plot - Uses fixed variable 'adjusted_most_likely_time'
-        sim_times = _pert_monte_carlo_simulation(adjusted_most_likely_time * 0.9, adjusted_most_likely_time, adjusted_most_likely_time * 1.2)
-        p85_time = _calculate_p85(sim_times)
-        
-        if len(sim_times) > 0:
-            fig2, ax2 = plt.subplots(figsize=(10, 6))
-            ax2.hist(sim_times, bins=50, density=True, alpha=0.7, color='lightcoral', edgecolor='black', label='Time Distribution')
-            ax2.set_title('Simulated Total Project Time Distribution (PERT Analysis)')
-            ax2.set_xlabel('Time (Weeks)')
-            ax2.set_ylabel('Density')
-            ax2b = ax2.twinx()
-            sorted_times = np.sort(sim_times)
-            cdf_t = np.arange(1, len(sorted_times) + 1) / len(sorted_times)
-            ax2b.plot(sorted_times, cdf_t * 100, color='darkred', label='Cumulative Frequency (%)')
-            ax2.axvline(adjusted_most_likely_time, color='red', linestyle='dotted', label=f'Adj. ML Time: {adjusted_most_likely_time:.1f} wks')
-            ax2.axvline(p85_time, color='green', linestyle='dotted', label=f'P85 Time: {p85_time:.1f} wks')
-            lines, labels = ax2.get_legend_handles_labels()
-            lines2, labels2 = ax2b.get_legend_handles_labels()
-            ax2.legend(lines + lines2, labels + labels2, loc='upper left', bbox_to_anchor=(1.05, 1))
-            plt.tight_layout()
-            results['plots_base64']['time_distribution_plot_base64'] = _plot_to_base64(fig2)
-
-        # 10. Final Data Mapping (Using fixed variable names)
         results.update({
-            'adjusted_most_likely_cost_cad': float(adjusted_most_likely_cost), 
-            'adjusted_most_likely_time_weeks': float(adjusted_most_likely_time),
-            'p85_cost_cad': float(p85_cost),
-            'contingency_reserve_cad': float(cont_reserve),
-            'management_reserve_cad': float(mgmt_reserve),
-            'total_project_cost_cad': float(total_project_cost_cad),
-            'total_project_time_weeks': float(p85_time),
-            'total_opportunity_cost_reduction_cad': float(total_opportunity_cost_reduction), 
-            'total_opportunity_time_reduction_weeks': float(total_opportunity_time_reduction),
-            'identified_risks_with_qualquan_data': risks_with_qualquan_data,
-            'identified_opportunities_with_qualquan_data': opportunities_with_qualquan_data
+            'adjusted_most_likely_cost_cad': adjusted_most_likely_cost, 'adjusted_most_likely_time_weeks': adjusted_most_likely_time,
+            'total_opportunity_cost_reduction_cad': total_opportunity_cost_reduction, 'total_opportunity_time_reduction_weeks': total_opportunity_time_reduction
         })
 
-        _update_internal_status("Pipeline Complete!", 100)
+        # 7. Prepare for Monte Carlo simulations
+        original_opt_cost_spread = baseline_estimates.get('cost_most_likely_cad', 0.0) - baseline_estimates.get('cost_optimistic_cad', 0.0)
+        original_pess_cost_spread = baseline_estimates.get('cost_pessimistic_cad', 0.0) - baseline_estimates.get('cost_most_likely_cad', 0.0)
+        new_optimistic_cost_for_mc = max(0.0, min(adjusted_most_likely_cost - original_opt_cost_spread, adjusted_most_likely_cost))
+        new_pessimistic_cost_for_mc = max(adjusted_most_likely_cost, adjusted_most_likely_cost + original_pess_cost_spread)
+
+        original_opt_time_spread = baseline_estimates.get('time_most_likely_weeks', 0.0) - baseline_estimates.get('time_optimistic_weeks', 0.0)
+        original_pess_time_spread = baseline_estimates.get('time_pessimistic_weeks', 0.0) - baseline_estimates.get('time_most_likely_weeks', 0.0)
+        new_optimistic_time_for_mc = max(0.0, min(adjusted_most_likely_time - original_opt_time_spread, adjusted_most_likely_time))
+        new_pessimistic_time_for_mc = max(adjusted_most_likely_time, adjusted_most_likely_time + original_pess_time_spread)
+
+        # 8. Perform Monte Carlo Simulations for Total Project
+        _update_internal_status("Performing Monte Carlo simulations for total project...", 60)
+        simulated_costs = _monte_carlo_simulation(
+            new_optimistic_cost_for_mc,
+            adjusted_most_likely_cost,
+            new_pessimistic_cost_for_mc,
+            num_simulations=NUM_SIMULATIONS
+        )
+        simulated_times = _monte_carlo_simulation(
+            new_optimistic_time_for_mc,
+            adjusted_most_likely_time,
+            new_pessimistic_time_for_mc,
+            num_simulations=NUM_SIMULATIONS
+        )
+
+        # 9. Calculate P85 and Contingency Reserve
+        _update_internal_status("Calculating P85 and contingency reserve...", 70)
+        p85_cost = _calculate_p85(simulated_costs)
+        p85_time = _calculate_p85(simulated_times)
+        contingency_reserve_cad = max(0, p85_cost - adjusted_most_likely_cost)
+        results.update({'p85_cost_cad': p85_cost, 'p85_time_weeks': p85_time, 'contingency_reserve_cad': contingency_reserve_cad})
+
+        # 10. Simulate Owner/Engineer Born Risks for Management Reserve
+        _update_internal_status("Simulating owner/engineer risks for management reserve...", 75)
+        oe_and_shared_risks = [r for r in risks_with_qualquan_data if r.get('risk_category') in ['Owner-borne', 'Engineer-borne', 'Shared']]
+        total_oe_and_shared_cost_optimistic, total_oe_and_shared_cost_most_likely, total_oe_and_shared_cost_pessimistic = 0.0, 0.0, 0.0
+        for risk in oe_and_shared_risks:
+            multiplier = 0.5 if risk.get('risk_category') == 'Shared' else 1.0
+            total_oe_and_shared_cost_optimistic += risk['cost_optimistic_usd'] * USD_TO_CAD_EXCHANGE_RATE * multiplier
+            total_oe_and_shared_cost_most_likely += risk['cost_most_likely_usd'] * USD_TO_CAD_EXCHANGE_RATE * multiplier
+            total_oe_and_shared_cost_pessimistic += risk['cost_pessimistic_usd'] * USD_TO_CAD_EXCHANGE_RATE * multiplier
+        simulated_owner_engineer_costs = _monte_carlo_simulation(total_oe_and_shared_cost_optimistic, total_oe_and_shared_cost_most_likely, total_oe_and_shared_cost_pessimistic, num_simulations=NUM_SIMULATIONS) if total_oe_and_shared_cost_most_likely > 0 else np.zeros(NUM_SIMULATIONS)
+        management_reserve_cad = _calculate_p85(simulated_owner_engineer_costs)
+        results['management_reserve_cad'] = management_reserve_cad
+
+        # 11. NEW: Simulate Contractor Born Risks for Plotting
+        _update_internal_status("Simulating contractor risks for plotting...", 77)
+        contractor_risks = [r for r in risks_with_qualquan_data if r.get('risk_category') == 'Contractor-borne' or r.get('risk_category') == 'Shared']
+        total_contractor_cost_optimistic, total_contractor_cost_most_likely, total_contractor_cost_pessimistic = 0.0, 0.0, 0.0
+        for risk in contractor_risks:
+            multiplier = 0.5 if risk.get('risk_category') == 'Shared' else 1.0
+            total_contractor_cost_optimistic += risk['cost_optimistic_usd'] * USD_TO_CAD_EXCHANGE_RATE * multiplier
+            total_contractor_cost_most_likely += risk['cost_most_likely_usd'] * USD_TO_CAD_EXCHANGE_RATE * multiplier
+            total_contractor_cost_pessimistic += risk['cost_pessimistic_usd'] * USD_TO_CAD_EXCHANGE_RATE * multiplier
+        simulated_contractor_costs = _monte_carlo_simulation(total_contractor_cost_optimistic, total_contractor_cost_most_likely, total_contractor_cost_pessimistic, num_simulations=NUM_SIMULATIONS) if total_contractor_cost_most_likely > 0 else np.zeros(NUM_SIMULATIONS)
+
+        # 12. Final Totals
+        total_project_cost_cad = adjusted_most_likely_cost + contingency_reserve_cad + management_reserve_cad
+        total_project_time_weeks = adjusted_most_likely_time + (p85_time - adjusted_most_likely_time)
+        
+        # Corrected code to convert tensors/arrays to lists for JSON serialization
+        results['simulated_total_costs_cad'] = simulated_costs.tolist()
+        results['simulated_total_times_weeks'] = simulated_times.tolist()
+        results['total_project_cost_cad'] = float(total_project_cost_cad)
+        results['total_project_time_weeks'] = float(total_project_time_weeks)
+
+     # 6. Generate Plots (Cost and Time Distribution)
+        _update_internal_status("Generating cost and time distribution plots...", 80)
+        results['plots_base64'] = {} # Initialize plots_base64 dictionary
+
+        if len(simulated_costs) > 0 and not np.all(simulated_costs == 0):
+            fig_cost_dist, ax_cost_dist = plt.subplots(figsize=(10, 6))
+            ax_cost_dist.hist(simulated_costs, bins=50, density=True, alpha=0.7, color='skyblue', edgecolor='black', label='Cost Distribution')
+            ax_cost_dist.set_xlabel('Cost (CAD)')
+            ax_cost_dist.set_ylabel('Density')
+            ax_cost_dist.set_title('Simulated Total Project Cost Distribution (PERT Analysis)') # Updated title
+            
+            # Set x-axis limits to show full distribution
+            cost_mean = np.mean(simulated_costs)
+            cost_std = np.std(simulated_costs)
+            if cost_std > 0:
+                ax_cost_dist.set_xlim(max(0, cost_mean - 4 * cost_std), cost_mean + 4 * cost_std)
+            else:
+                ax_cost_dist.set_xlim(max(0, cost_mean * 0.9), cost_mean * 1.1 if cost_mean > 0 else 1)
+            
+            ax2_cost = ax_cost_dist.twinx()
+            sorted_costs = np.sort(simulated_costs)
+            cdf_cost = np.arange(1, len(sorted_costs) + 1) / len(sorted_costs)
+            ax2_cost.plot(sorted_costs, cdf_cost * 100, color='blue', linestyle='-', label='Cumulative Frequency (%)')
+            ax2_cost.set_ylabel('Cumulative Frequency (%)')
+            ax2_cost.set_ylim(0, 100)
+
+            ax_cost_dist.axvline(adjusted_most_likely_cost, color='red', linestyle='dotted', linewidth=1.5, label=f'Adjusted ML Cost: ${adjusted_most_likely_cost:,.0f}')
+            ax_cost_dist.axvline(p85_cost, color='green', linestyle='dotted', linewidth=1.5, label=f'P85 Cost: ${p85_cost:,.0f}')
+            ax_cost_dist.axvline(total_project_cost_cad, color='purple', linestyle='dashed', linewidth=1.5, label=f'Total Project Cost: ${total_project_cost_cad:,.0f}')
+
+
+            lines, labels = ax_cost_dist.get_legend_handles_labels()
+            lines2, labels2 = ax2_cost.get_legend_handles_labels()
+            ax2_cost.legend(lines + lines2, labels + labels2, loc='upper left', bbox_to_anchor=(1.05, 1))
+
+            results['plots_base64']['cost_distribution_plot_base64'] = _plot_to_base64(fig_cost_dist)
+        else:
+            results['plots_base64']['cost_distribution_plot_base64'] = None
+
+        if len(simulated_times) > 0 and not np.all(simulated_times == 0):
+            fig_time_dist, ax_time_dist = plt.subplots(figsize=(10, 6))
+            ax_time_dist.hist(simulated_times, bins=50, density=True, alpha=0.7, color='lightcoral', edgecolor='black', label='Time Distribution')
+            ax_time_dist.set_xlabel('Time (Weeks)')
+            ax_time_dist.set_ylabel('Density')
+            ax_time_dist.set_title('Simulated Total Project Time Distribution (PERT Analysis)') # Updated title
+
+            time_mean = np.mean(simulated_times)
+            time_std = np.std(simulated_times)
+            if time_std > 0:
+                ax_time_dist.set_xlim(max(0, time_mean - 4 * time_std), time_mean + 4 * time_std)
+            else:
+                ax_time_dist.set_xlim(max(0, time_mean * 0.9), time_mean * 1.1 if time_mean > 0 else 1)
+
+            ax2_time = ax_time_dist.twinx()
+            sorted_times = np.sort(simulated_times)
+            cdf_time = np.arange(1, len(sorted_times) + 1) / len(sorted_times)
+            ax2_time.plot(sorted_times, cdf_time * 100, color='darkred', linestyle='-', label='Cumulative Frequency (%)')
+            ax2_time.set_ylabel('Cumulative Frequency (%)')
+            ax2_time.set_ylim(0, 100)
+
+            ax_time_dist.axvline(adjusted_most_likely_time, color='red', linestyle='dotted', linewidth=1.5, label=f'Adjusted ML Time: {adjusted_most_likely_time:.1f} weeks')
+            ax_time_dist.axvline(p85_time, color='green', linestyle='dotted', linewidth=1.5, label=f'P85 Time: {p85_time:.1f} weeks')
+            ax_time_dist.axvline(total_project_time_weeks, color='purple', linestyle='dashed', linewidth=1.5, label=f'Total Project Time: {total_project_time_weeks:.1f} weeks')
+
+            lines, labels = ax_time_dist.get_legend_handles_labels()
+            lines2, labels2 = ax2_time.get_legend_handles_labels()
+            ax2_time.legend(lines + lines2, labels + labels2, loc='upper left', bbox_to_anchor=(1.05, 1))
+
+            results['plots_base64']['time_distribution_plot_base64'] = _plot_to_base64(fig_time_dist)
+        else:
+            results['plots_base64']['time_distribution_plot_base64'] = None
+
+        # 7. Generate Contractor-Related Risk Cost Distribution Plot
+        contractor_risks = [r for r in risks_with_qualquan_data if r.get('risk_category') == 'Contractor-borne' or r.get('risk_category') == 'Shared']
+        total_contractor_cost_optimistic = 0.0
+        total_contractor_cost_most_likely = 0.0
+        total_contractor_cost_pessimistic = 0.0
+
+        for risk in contractor_risks:
+            multiplier = 0.5 if risk.get('risk_category') == 'Shared' else 1.0
+            total_contractor_cost_optimistic += risk['cost_optimistic_usd'] * USD_TO_CAD_EXCHANGE_RATE * multiplier
+            total_contractor_cost_most_likely += risk['cost_most_likely_usd'] * USD_TO_CAD_EXCHANGE_RATE * multiplier
+            total_contractor_cost_pessimistic += risk['cost_pessimistic_usd'] * USD_TO_CAD_EXCHANGE_RATE * multiplier
+
+        if total_contractor_cost_most_likely == 0:
+            simulated_contractor_costs = np.zeros(NUM_SIMULATIONS)
+        else:
+            simulated_contractor_costs = _monte_carlo_simulation(
+                total_contractor_cost_optimistic,
+                total_contractor_cost_most_likely,
+                total_contractor_cost_pessimistic,
+                num_simulations=NUM_SIMULATIONS
+            )
+        
+        if len(simulated_contractor_costs) > 0 and not np.all(simulated_contractor_costs == 0):
+            fig_contractor_risk_cost, ax_contractor_risk_cost = plt.subplots(figsize=(10, 6))
+            ax_contractor_risk_cost.hist(simulated_contractor_costs, bins=50, density=True, alpha=0.7, color='darkgreen', edgecolor='black', label='Cost Impact Distribution')
+            ax_contractor_risk_cost.set_title('Simulated Contractor-Related Risk Cost Impact Distribution')
+            ax_contractor_risk_cost.set_xlabel('Cost Impact (CAD)')
+            ax_contractor_risk_cost.set_ylabel('Density')
+            
+            # Add vertical line for the expected value (mean)
+            mean_val = np.mean(simulated_contractor_costs)
+            std_val = np.std(simulated_contractor_costs)
+            if std_val > 0:
+                ax_contractor_risk_cost.set_xlim(max(0, mean_val - 4 * std_val), mean_val + 4 * std_val)
+            else:
+                ax_contractor_risk_cost.set_xlim(max(0, mean_val * 0.9), mean_val * 1.1 if mean_val > 0 else 1)
+            
+            # Add S-curve
+            ax2_contractor = ax_contractor_risk_cost.twinx()
+            sorted_contractor_costs = np.sort(simulated_contractor_costs)
+            cdf_contractor_cost = np.arange(1, len(sorted_contractor_costs) + 1) / len(sorted_contractor_costs)
+            ax2_contractor.plot(sorted_contractor_costs, cdf_contractor_cost * 100, color='blue', linestyle='-', label='Cumulative Frequency (%)')
+            ax2_contractor.set_ylabel('Cumulative Frequency (%)')
+            ax2_contractor.set_ylim(0, 100)
+
+            # Add P85 line
+            p85_contractor_cost = _calculate_p85(simulated_contractor_costs)
+            ax_contractor_risk_cost.axvline(p85_contractor_cost, color='orange', linestyle='dotted', linewidth=1.5, label=f'P85 Cost: ${p85_contractor_cost:,.0f}')
+            
+            lines, labels = ax_contractor_risk_cost.get_legend_handles_labels()
+            lines2, labels2 = ax2_contractor.get_legend_handles_labels()
+            ax_contractor_risk_cost.legend(lines + lines2, labels + labels2, loc='upper left', bbox_to_anchor=(1.05, 1))
+
+            results['plots_base64']['contractor_risk_cost_plot_base64'] = _plot_to_base64(fig_contractor_risk_cost)
+        else:
+            results['plots_base64']['contractor_risk_cost_plot_base64'] = None
+
+        # 8. Generate Owner/Engineer-Born Risk Cost Distribution Plot
+        if len(simulated_owner_engineer_costs) > 0 and not np.all(simulated_owner_engineer_costs == 0):
+            fig_owner_engineer_risk_cost, ax_owner_engineer_risk_cost = plt.subplots(figsize=(10, 6))
+            ax_owner_engineer_risk_cost.hist(simulated_owner_engineer_costs, bins=50, density=True, alpha=0.7, color='purple', edgecolor='black', label='Cost Impact Distribution')
+            ax_owner_engineer_risk_cost.set_title('Simulated Owner/Engineer-Born Risk Cost Impact Distribution')
+            ax_owner_engineer_risk_cost.set_xlabel('Cost Impact (CAD)')
+            ax_owner_engineer_risk_cost.set_ylabel('Density')
+
+            mean_val = np.mean(simulated_owner_engineer_costs)
+            std_val = np.std(simulated_owner_engineer_costs)
+            ax_owner_engineer_risk_cost.axvline(mean_val, color='red', linestyle='dashed', linewidth=1.5, label=f'Mean Impact: ${mean_val:,.0f}')
+            ax_owner_engineer_risk_cost.axvline(management_reserve_cad, color='green', linestyle='dotted', linewidth=1.5, label=f'Management Reserve (P85): ${management_reserve_cad:,.0f}')
+            
+            if std_val > 0:
+                ax_owner_engineer_risk_cost.set_xlim(max(0, mean_val - 4 * std_val), mean_val + 4 * std_val)
+            else:
+                ax_owner_engineer_risk_cost.set_xlim(max(0, mean_val * 0.9), mean_val * 1.1 if mean_val > 0 else 1)
+
+            # Add S-curve
+            ax2_owner_engineer = ax_owner_engineer_risk_cost.twinx()
+            sorted_owner_engineer_costs = np.sort(simulated_owner_engineer_costs)
+            cdf_owner_engineer_cost = np.arange(1, len(sorted_owner_engineer_costs) + 1) / len(sorted_owner_engineer_costs)
+            ax2_owner_engineer.plot(sorted_owner_engineer_costs, cdf_owner_engineer_cost * 100, color='blue', linestyle='-', label='Cumulative Frequency (%)')
+            ax2_owner_engineer.set_ylabel('Cumulative Frequency (%)')
+            ax2_owner_engineer.set_ylim(0, 100)
+
+            lines, labels = ax_owner_engineer_risk_cost.get_legend_handles_labels()
+            lines2, labels2 = ax2_owner_engineer.get_legend_handles_labels()
+            ax_owner_engineer_risk_cost.legend(lines + lines2, labels + labels2, loc='upper left', bbox_to_anchor=(1.05, 1))
+
+            results['plots_base64']['owner_engineer_risk_cost_plot_base64'] = _plot_to_base64(fig_owner_engineer_risk_cost)
+        else:
+            results['plots_base64']['owner_engineer_risk_cost_plot_base64'] = None
+
+        _update_internal_status("Initial analysis pipeline completed.", 90)
+
+        _update_internal_status("Initial analysis pipeline completed.", 100)
+        _internal_analysis_status['models_loaded'] = True # Correcting the status flag
         return results
 
     except Exception as e:
-        error_msg = f"Analysis Pipeline Crash: {str(e)}"
-        _update_internal_status(error_msg, 0, error=error_msg)
-        return {"error": error_msg}
-        
+        error_message = f"Flask backend analyze_project_route error: {e}"
+        _update_internal_status(error_message, 0, error=error_message)
+        print(error_message)
+        return {"error": error_message}
+                
         
 def _generate_llm_response(prompt):
     """
@@ -4169,5 +4289,4 @@ def _save_procurement_schedule_log(log_entry):
             f.write(json.dumps(log_entry) + '\n')
     except Exception as e:
         print(f"Warning: Could not save procurement schedule log: {e}")
-
 
